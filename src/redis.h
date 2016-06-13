@@ -819,6 +819,7 @@ struct redisServer {
     redisOpArray also_propagate;    /* Additional command to propagate. */
     /* Logging */
     char *logfile;                  /* Path of log file */
+	char *chaos_configfile;			/* Path of chaos config file */
     int syslog_enabled;             /* Is syslog enabled? */
     char *syslog_ident;             /* Syslog ident */
     POSIX_ONLY(int syslog_facility;)            /* Syslog facility */

@@ -3648,6 +3648,7 @@ void redisSetProcTitle(char *title) {
 
 int main(int argc, char **argv) {
     struct timeval tv;
+	server.chaos_configfile = "chaos.conf";
 
     /* We need to initialize our libraries, and the server configuration. */
 #ifdef INIT_SETPROCTITLE_REPLACEMENT

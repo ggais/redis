@@ -39,6 +39,17 @@
 #endif
 #include <math.h>
 
+/*default chaos setting*/
+int errorProbability = 0; // in percentage
+int faultDownTime = 0; // in seconds
+int minimumWaitTime = 0; // in seconds
+
+
+int inFaultMode = 0;
+clock_t faultStartTime;
+clock_t faultEndTime;
+int randomVal = 0;
+int tbInitialized = 0;
 WIN32_ONLY(extern int WSIOCP_QueueAccept(int listenfd);)
 
 static void setProtocolError(redisClient *c, int pos);
@@ -69,6 +80,124 @@ void *dupClientReplyValue(void *o) {
 
 int listMatchObjects(void *a, void *b) {
     return equalStringObjects(a,b);
+}
+
+/* Generates a random value between 0 and 99 */
+int getRandomVal(){
+	srand((unsigned int)time(NULL));
+	return rand() % 100;
+}
+
+/* Returns 1 if a randomness is within specified error probability */
+int isRandomError()
+{
+	int randVal = getRandomVal();
+	if (randVal >= errorProbability){
+		return 0;
+	}
+	else{
+		return 1;
+	}
+}
+
+/* Get executable path of redis-server. */
+char* getExePath() {
+	HMODULE hModule = GetModuleHandleW(NULL);
+	WCHAR fullpath[MAX_PATH];
+	GetModuleFileNameW(hModule, fullpath, MAX_PATH);
+
+	int len = (wcslen(fullpath) - 1) - strlen("redis-server.exe");
+	char* path = "";
+	for (int i = 0; i <= len; i++) {
+		path[i] = (char)fullpath[i];
+	}
+
+	return path;
+}
+
+/* Initializes chaos settings from conifgurable file 'chaos.conf' */
+void initializeChaosSettings()
+{
+	faultEndTime = faultStartTime = clock();
+
+	char* exePath = getExePath();
+	char* configFile = strcat(exePath, server.chaos_configfile);
+
+	FILE *fpConfig = fopen(configFile, "r");
+	if (fpConfig == NULL){
+		printf("Could not open Redis Cache Test Bot Config, initialized with default values\r\n");
+	}
+	else {
+		char line[128];
+		while (fgets(line, sizeof line, fpConfig) != NULL){
+			char* key = strtok(line, "=");
+			char* value = strtok(NULL, "\r\n");
+
+			if (strcmp(key, "ErrorProbability") == 0){
+				errorProbability = atoi(value);
+			}
+			else if (strcmp(key, "FaultDownTime") == 0){
+				faultDownTime = atoi(value);
+			}
+			else if (strcmp(key, "MinimumWaitTimeBetweenFaults") == 0){
+				minimumWaitTime = atoi(value);
+			}
+		}
+		fclose(fpConfig);
+	}
+}
+
+/* Returns 1 if the random chaos logic suggests a fault else returns 0 */
+int causeFault() {
+	
+	/* Read the chaos settings from config file, if the settings are not read already. */
+	if (tbInitialized == 0) {
+		initializeChaosSettings();
+		tbInitialized = 1;
+	}
+
+	/* If the error probability is 0 or 100, no further logic requied. */
+	if (errorProbability <= 0) {
+		return 0;
+	}
+
+	if (errorProbability >= 100) {
+		return 1;
+	}
+
+	
+	/* Time elapsed since last forced fault session */
+	int elapsedWaitTime = (clock() - faultEndTime) / CLOCKS_PER_SEC;
+
+	/* Time elapses in current fault session */
+	int elapsedDownTime = (clock() - faultStartTime) / CLOCKS_PER_SEC;
+
+	if (inFaultMode == 0) {
+
+		/* If time is not for the next fault, then return success	*/
+		if (minimumWaitTime > elapsedWaitTime) {
+			return 0;
+		}
+
+		/* If the random logic suggests fault
+		 * set fault mode and start fault session for specified period of time. */
+		if (isRandomError() == 1) {
+			inFaultMode = 1;
+			faultStartTime = clock();
+			return 1;
+		} /* If the random logic suggests success then return success */
+		else { 
+			return 0;
+		}
+	}  /* If the request arrives within fault down time, then return failure */
+	else if (faultDownTime > elapsedDownTime) {
+		return 1;
+	}
+	else  { /* This suggests, fault down time is over, return success */
+		inFaultMode = 0;
+		faultEndTime = clock();
+		return 0;
+	}
 }
 
 redisClient *createClient(int fd) {
@@ -616,6 +745,18 @@ static void acceptCommonHandler(int fd, int flags) {
         freeClient(c);
         return;
     }
+
+	/* If chaos logic suggests faults, send error, update server stat and free up client */
+	if (causeFault() == 1) {
+		char *err = "Redis Cache Chaos Bot REJECTED Connection\r\n";
+		if (write(c->fd, err, strlen(err)) == -1) {
+			/* Nothing to do, Just to avoid the warning... */
+		}
+		server.stat_rejected_conn++;
+		freeClient(c);
+		return;
+	}
+	
     server.stat_numconnections++;
     c->flags |= flags;
 }
@@ -1301,6 +1442,12 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(mask);
 
+	/* If chaos logic suggests faults, send error and free up client */
+	if (causeFault() == 1){
+		freeClient(c);
+		return;
+	}
+	
     server.current_client = c;
     readlen = REDIS_IOBUF_LEN;
     /* If this is a multi bulk request, and we are processing a bulk reply
